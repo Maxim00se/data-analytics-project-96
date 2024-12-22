@@ -1,98 +1,96 @@
-/*
- * Создаем витрину aggregate_last_paid_click
- */
-with vk_cost as (                             --Затраты на рекламу vk
-	select
-        vk.campaign_date as visit_date,
-        vk.utm_source,
-        vk.utm_medium,
-        vk.utm_campaign,
-        vk.utm_content,
-        SUM(vk.daily_spent) as total_spent
-    from vk_ads as vk
-    group by 
-    	vk.campaign_date,
-    	vk.utm_source,
-    	vk.utm_medium,
-    	vk.utm_campaign,
-    	vk.utm_content
+with tab1 as (
+    select
+    	s.visitor_id,
+        date(s.visit_date) as visit_date,
+        s.source,
+        s.medium,
+        s.campaign,
+        l.lead_id,
+        date(l.created_at) as created_at,
+        l.closing_reason,
+        l.status_id,
+        l.amount,
+        row_number()
+            over (
+                partition by s.visitor_id
+                order by s.visit_date desc
+            ) as rnk        
+    from sessions as s
+    left join leads as l
+    	on s.visitor_id = l.visitor_id
+    	and s.visit_date <= l.created_at
+    where s.medium <> 'organic'
 ),
-ya_cost as (                                  --Затраты на рекламу yandex
+filtered_tab1 as (
 	select
-		ya.campaign_date as visit_date,
-		ya.utm_source,
-    	ya.utm_medium,
-    	ya.utm_campaign,
-    	ya.utm_content,
-    	SUM(ya.daily_spent) as total_spent
+		source,
+		medium,
+		campaign,
+        visit_date,
+        count(visitor_id) as visitors_count,
+        count(lead_id) as leads_count,
+        count(lead_id) filter (where tab1.closing_reason = 'Успешная продажа' or status_id = 142) as purchases_count, 
+        sum(amount) as revenue
+    from tab1
+    where rnk = 1
+    group by
+    	visit_date,
+    	source,
+		medium,
+		campaign
+),
+vk_cost as (
+	select
+		date(campaign_date) as campaign_date,
+		utm_source,
+		utm_medium,
+		utm_campaign,
+		sum(daily_spent) as total_cost
+	from vk_ads as va
+	group by date(campaign_date), utm_source, utm_medium, utm_campaign 
+),
+ya_cost as (
+	select
+		date(campaign_date) as campaign_date,
+		utm_source,
+		utm_medium,
+		utm_campaign,
+		sum(daily_spent) as total_cost
 	from ya_ads as ya
-	group by
-		ya.campaign_date,
-		ya.utm_source,
-		ya.utm_medium,
-		ya.utm_campaign,
-		ya.utm_content
+	group by date(campaign_date), utm_source, utm_medium, utm_campaign 
 ),
-all_cost as (                                 --Соединяем затраты в одну таблицу с помошью UNION ALL
+all_cost as (
 	select
-		vk_cost.visit_date,
-        vk_cost.utm_source,
-        vk_cost.utm_medium,
-        vk_cost.utm_campaign,
-        vk_cost.utm_content,
-        vk_cost.total_spent
-	from vk_cost
-	union all
-	select
-		ya_cost.visit_date,
-		ya_cost.utm_source,
-    	ya_cost.utm_medium,
-    	ya_cost.utm_campaign,
-    	ya_cost.utm_content,
-    	ya_cost.total_spent
-    from ya_cost
+		campaign_date,
+		utm_source,
+        utm_medium,
+        utm_campaign,
+        sum(total_cost) as total_cost
+    from (
+    	select *
+		from vk_cost
+		union all
+		select *
+    	from ya_cost
+	) as combined_costs
+	group by campaign_date, utm_source, utm_medium, utm_campaign
 )
---Основной запрос: собираем данные
 select
-	DATE(s.visit_date) as visit_date,         --Дата визита
-	s.source as utm_source,                   --Канал
-	s.medium as utm_medium,                   --Тип трафика
-	s.campaign as utm_campaign,               --Компания
-	count(s.visitor_id) as visitors_count,    --Кол-во посещений
-	sum(all_cost.total_spent) as total_spent, --Суммируем затраты из all_cost по категориям
-	count(l.lead_id) as leads_count,          --Кол-во лидов
-	COUNT(
-        case
-            when
-                l.closing_reason = 'Успешно реализовано' or l.status_id = 142
-                then l.lead_id
-        end
-    ) as purchases_count,                     --Кол-во успешно закрытых лидов
-	SUM(
-        case
-            when
-                l.closing_reason = 'Успешно реализовано' or l.status_id = 142
-                then l.amount
-        end
-    ) as revenue                              --Общая прибыль
-from sessions as s
-/*
- * Соединяем таблицы, 
- * выставляем фильтры (только платные источники), 
- * группируем и сортируем
- */
-left join all_cost 
-	on s.source = all_cost.utm_source
-	and s.medium = all_cost.utm_medium
-	and s.campaign = all_cost.utm_campaign
-	and DATE(s.visit_date) = all_cost.visit_date
-left join leads as l
-	on l.visitor_id = s.visitor_id 
-	and date(l.created_at) >= date(s.visit_date)
-where s.medium in ('cpc', 'cpm', 'cpa', 'youtube',
-'cpp', 'tg', 'social')
-group by DATE(s.visit_date), s.source, s.medium,
-s.campaign
+	ft.visit_date,
+	ft.visitors_count,
+	ft.source as utm_source,
+	ft.medium as utm_medium,
+	ft.campaign as utm_campaign,
+	all_cost.total_cost,
+	ft.leads_count,
+	ft.purchases_count,
+	ft.revenue
+from filtered_tab1 as ft
+left join all_cost
+	on ft.visit_date = all_cost.campaign_date
+	and ft.source = all_cost.utm_source
+	and ft.medium = all_cost.utm_medium
+	and ft.campaign = all_cost.utm_campaign
 order by
 	revenue desc nulls last,
 	visit_date asc,
@@ -101,3 +99,4 @@ order by
 	utm_medium asc,
 	utm_campaign asc
 limit 15
+

@@ -12,7 +12,7 @@ with tab as (
             )
         as rnk
     from sessions as s
-    where s.medium <> 'organic'
+    where s.medium <> 'organic'    
 )
 select
     tab.visitor_id,
